@@ -17,8 +17,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.*
 import org.json.JSONObject
 import kotlin.math.roundToInt
 
@@ -38,6 +40,13 @@ class MainActivity : ComponentActivity() {
     private var battery by mutableStateOf(0)
     private var locationText by mutableStateOf("Ubicación no disponible")
 
+    // IA local
+    private var aiEngine by mutableStateOf(KarbysRouter.ENGINE_LOCAL_FIRST)
+    private var modelStatus by mutableStateOf("Sin modelo local instalado")
+    private var modelProgress by mutableStateOf(-1)
+    private var modelBusy by mutableStateOf(false)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         val mic = result[Manifest.permission.RECORD_AUDIO] == true || has(Manifest.permission.RECORD_AUDIO)
         if (mic) startKarbys() else paused = true
@@ -45,24 +54,63 @@ class MainActivity : ComponentActivity() {
         updateDeviceInfo()
     }
 
+    private val pickModel = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            modelStatus = "Copiando el modelo a WayCore…"
+            modelBusy = true
+            scope.launch(Dispatchers.IO) { ModelManager.importFromUri(applicationContext, uri) }
+        }
+    }
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != WayHatService.ACTION_STATUS) return
-            intent.getStringExtra("message")?.let { wayHatMessage = it }
-            if (intent.hasExtra("connected")) wayHatConnected = intent.getBooleanExtra("connected", false)
-            intent.getStringExtra("telemetry")?.let { parseTelemetry(it) }
+            if (intent == null) return
+            when (intent.action) {
+                WayHatService.ACTION_STATUS -> {
+                    intent.getStringExtra("message")?.let { wayHatMessage = it }
+                    if (intent.hasExtra("connected")) wayHatConnected = intent.getBooleanExtra("connected", false)
+                    intent.getStringExtra("telemetry")?.let { parseTelemetry(it) }
+                }
+                ModelManager.ACTION_MODEL_STATUS -> {
+                    val state = intent.getStringExtra(ModelManager.EXTRA_STATE).orEmpty()
+                    val message = intent.getStringExtra(ModelManager.EXTRA_MESSAGE).orEmpty()
+                    modelProgress = intent.getIntExtra(ModelManager.EXTRA_PROGRESS, -1)
+                    modelBusy = state == "downloading" || state == "importing"
+                    when (state) {
+                        "ready", "deleted" -> {
+                            modelProgress = -1
+                            LocalLlmClient.invalidate()
+                            modelStatus = ModelManager.statusText(this@MainActivity)
+                        }
+                        "error" -> {
+                            modelProgress = -1
+                            modelStatus = if (message.isBlank()) "No pude instalar el modelo." else message
+                        }
+                        else -> modelStatus = message.ifBlank { ModelManager.statusText(this@MainActivity) }
+                    }
+                }
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val filter = IntentFilter(WayHatService.ACTION_STATUS)
+        val filter = IntentFilter().apply {
+            addAction(WayHatService.ACTION_STATUS)
+            addAction(ModelManager.ACTION_MODEL_STATUS)
+        }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(receiver, filter)
+
+        aiEngine = KarbysRouter.engine(this)
+        modelStatus = ModelManager.statusText(this)
+
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
                     var prompt by remember { mutableStateOf("") }
+                    var modelUrl by remember { mutableStateOf(ModelManager.savedUrl(this@MainActivity)) }
+                    var hfToken by remember { mutableStateOf(ModelManager.savedToken(this@MainActivity)) }
                     Column(
                         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -83,6 +131,81 @@ class MainActivity : ComponentActivity() {
                         Button(onClick = { if (prompt.isNotBlank()) { sendText(prompt.trim()); prompt = "" } }, modifier = Modifier.padding(top = 8.dp)) {
                             Text("ENVIAR")
                         }
+
+                        HorizontalDivider(Modifier.padding(vertical = 18.dp))
+                        Text("MOTOR DE IA DE KARBYS", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "La IA local piensa en tu teléfono: responde más rápido y sin Internet, y conserva el control de WayHat.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 6.dp)
+                        )
+                        listOf(
+                            KarbysRouter.ENGINE_LOCAL_FIRST to "Primero IA local (recomendado)",
+                            KarbysRouter.ENGINE_LOCAL_ONLY to "Solo IA local, sin Internet",
+                            KarbysRouter.ENGINE_GEMINI_FIRST to "Primero Gemini, IA local de respaldo",
+                            KarbysRouter.ENGINE_GEMINI_ONLY to "Solo Gemini"
+                        ).forEach { (value, label) ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Motor de IA: $label" }
+                            ) {
+                                RadioButton(selected = aiEngine == value, onClick = { chooseEngine(value) })
+                                Text(label)
+                            }
+                        }
+
+                        HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                        Text("MODELO DE IA LOCAL", style = MaterialTheme.typography.titleLarge)
+                        Text(modelStatus, modifier = Modifier.padding(top = 6.dp))
+                        if (modelProgress in 0..100 && modelBusy) {
+                            LinearProgressIndicator(
+                                progress = { modelProgress / 100f },
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { pickModel.launch(arrayOf("*/*")) }, enabled = !modelBusy, modifier = Modifier.weight(1f)) {
+                                Text("ELEGIR ARCHIVO")
+                            }
+                            OutlinedButton(
+                                onClick = { ModelManager.deleteModel(applicationContext); LocalLlmClient.invalidate() },
+                                enabled = !modelBusy && ModelManager.isModelReady(applicationContext),
+                                modifier = Modifier.weight(1f)
+                            ) { Text("BORRAR MODELO") }
+                        }
+                        OutlinedTextField(
+                            value = modelUrl,
+                            onValueChange = { modelUrl = it },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            label = { Text("URL directa del modelo (.task)") },
+                            singleLine = true,
+                            enabled = !modelBusy
+                        )
+                        OutlinedTextField(
+                            value = hfToken,
+                            onValueChange = { hfToken = it },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            label = { Text("Token de Hugging Face (opcional)") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            enabled = !modelBusy
+                        )
+                        Button(
+                            onClick = {
+                                ModelManager.saveUrl(applicationContext, modelUrl)
+                                ModelManager.saveToken(applicationContext, hfToken)
+                                modelBusy = true
+                                modelStatus = "Preparando descarga…"
+                                scope.launch(Dispatchers.IO) { ModelManager.download(applicationContext, modelUrl, hfToken) }
+                            },
+                            enabled = !modelBusy && modelUrl.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                        ) { Text("DESCARGAR MODELO") }
+                        Text(
+                            "El modelo Gemma 3 (1B) pesa unos 560 MB. Para descargarlo desde Hugging Face acepta antes su licencia en huggingface.co/litert-community/Gemma3-1B-IT con tu cuenta y crea un token en Settings, Access Tokens. También puedes descargar el archivo con tu navegador y usar ELEGIR ARCHIVO. Sin modelo local ni clave de Gemini, Karbys igual responde sus comandos básicos: hora, batería, ubicación, recordatorios y controles directos de WayHat.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
 
                         HorizontalDivider(Modifier.padding(vertical = 18.dp))
                         Text("WAYHAT", style = MaterialTheme.typography.titleLarge)
@@ -119,7 +242,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         unregisterReceiver(receiver)
+        scope.cancel()
         super.onDestroy()
+    }
+
+    private fun chooseEngine(value: String) {
+        aiEngine = value
+        KarbysRouter.setEngine(this, value)
     }
 
     private fun requestPermissionsIfNeeded() {

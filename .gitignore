@@ -1,0 +1,16 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures
+.externalNativeBuild
+.cxx
+
+# Los modelos de IA locales nunca se suben al repo (pesan cientos de MB)
+*.task
+*.bin
+*.litertlm
+models/

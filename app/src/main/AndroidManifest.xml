@@ -21,6 +21,7 @@
         android:theme="@style/Theme.WayCore"
         android:label="WayCore"
         android:allowBackup="false"
+        android:largeHeap="true"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>

@@ -407,7 +407,12 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         val clean = text.trim()
         scope.launch {
             val direct = executeLocalCommand(clean)
-            val answer = direct ?: GeminiClient.ask(clean, memory.toList(), buildDeviceContext())
+            val answer = direct ?: KarbysRouter.ask(
+                applicationContext, clean, memory.toList(), buildDeviceContext(),
+                onFirstLocalLoad = {
+                    speak("Dame un momento, estoy encendiendo mi IA local.", utteranceId = "karbys-notice")
+                }
+            )
             memory.add(ConversationTurn(clean, answer))
             while (memory.size > 4) memory.removeAt(0)
             withContext(Dispatchers.Main) {
@@ -573,7 +578,7 @@ Regla de seguridad: el TF-Luna tiene una zona de protección de mayor alcance qu
     private fun beepAlert() { try { tone?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 250) } catch (_: Exception) {} }
     private fun cancelContinuationTimeout() { continuationTimeout?.let(main::removeCallbacks); continuationTimeout = null }
 
-    private fun speak(text: String) {
+    private fun speak(text: String, utteranceId: String = "karbys-answer") {
         pausedByUser = false
         if (!::tts.isInitialized) { startHotword(); return }
         hotwordMode = false
@@ -584,7 +589,7 @@ Regla de seguridad: el TF-Luna tiene una zona de protección de mayor alcance qu
         beepReady()
         main.postDelayed({
             routeToHeadsetIfPossible()
-            tts.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, "karbys-answer")
+            tts.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         }, 80)
     }
 

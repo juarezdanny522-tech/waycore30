@@ -16,10 +16,20 @@ object GeminiClient {
         .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    suspend fun ask(user: String, memory: List<ConversationTurn>, deviceContext: String): String {
+    fun hasApiKey(): Boolean = BuildConfig.GEMINI_API_KEY.trim().isNotBlank()
+
+    suspend fun ask(user: String, memory: List<ConversationTurn>, deviceContext: String): String =
+        askOrNull(user, memory, deviceContext)
+            ?: "No pude conectar con Gemini. Revisa tu conexión a Internet."
+
+    /**
+     * Igual que [ask], pero devuelve null en cualquier fallo para que
+     * KarbysRouter pueda probar con otro motor (por ejemplo la IA local).
+     */
+    suspend fun askOrNull(user: String, memory: List<ConversationTurn>, deviceContext: String): String? {
         val apiKey = BuildConfig.GEMINI_API_KEY.trim()
-        if (apiKey.isBlank()) return "Falta configurar la clave de Gemini en WayCore."
-        if (user.isBlank()) return "No escuché ninguna pregunta."
+        if (apiKey.isBlank()) return null
+        if (user.isBlank()) return null
 
         return try {
             val contents = JSONArray().put(
@@ -30,9 +40,9 @@ object GeminiClient {
 
             repeat(3) {
                 val raw = generate(apiKey, contents)
-                if (raw == null) return "No pude obtener una respuesta válida de Gemini."
+                if (raw == null) return null
                 val candidate = raw.optJSONArray("candidates")?.optJSONObject(0)
-                    ?: return "Gemini no devolvió una respuesta válida."
+                    ?: return null
                 val modelContent = candidate.optJSONObject("content") ?: JSONObject()
                 val parts = modelContent.optJSONArray("parts") ?: JSONArray()
 
@@ -45,7 +55,7 @@ object GeminiClient {
                     if (t.isNotBlank()) text = if (text.isBlank()) t else "$text\n$t"
                 }
 
-                if (calls.isEmpty()) return text.ifBlank { "No recibí una respuesta hablada de Gemini." }
+                if (calls.isEmpty()) return text.trim().ifBlank { null }
 
                 // Preserve Gemini's model content, including tool-call metadata/signatures.
                 contents.put(JSONObject(modelContent.toString()).put("role", "model"))
@@ -63,9 +73,9 @@ object GeminiClient {
                 contents.put(JSONObject().put("role", "user").put("parts", responseParts))
             }
 
-            "No pude terminar la acción de WayHat en este momento."
+            null
         } catch (_: Exception) {
-            "No pude conectar con Gemini. Revisa tu conexión a Internet."
+            null
         }
     }
 
