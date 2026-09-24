@@ -1,6 +1,26 @@
-# WayCore + WayHat v0.5.0 — Telemetría real y control por Gemini
+# WayCore + WayHat v0.6.0 — Telemetría real y control por Gemini
 
 Esta versión usa la versión Bluetooth SPP estable anterior como base.
+
+## Novedades de la app v0.6.0
+
+- **"¿Dime?" en lugar del pitido**: cuando Karbys te va a escuchar (por palabra
+  clave, por el botón HABLAR o después de responderte), lo anuncia con su voz
+  diciendo "¿Dime?" en vez del antiguo sonidito.
+- **Palabra clave más confiable**: ahora acepta variantes de pronunciación
+  ("Oye Karbys", "Hey Karbis", "Her karbys", e incluso solo "Karbys"), usa
+  coincidencia difusa para errores del reconocedor y se reinicia sola si el
+  reconocedor se queda colgado.
+- **Comando en una sola frase**: puedes decir "Oye Karbys, ¿qué hora es?" y
+  Karbys atiende la pregunta de inmediato.
+- **Pausa por voz corregida**: "Pausa Karbys" ahora pausa de verdad, y decir
+  "Oye Karbys" la reactiva.
+
+## Descargar el APK
+
+El APK se compila automáticamente con GitHub Actions en cada cambio y se
+publica en [Releases](https://github.com/juarezdanny522-tech/waycore30/releases).
+Descarga el archivo `WayCore-vX.Y.Z.apk` en tu teléfono Android e instálalo.
 
 ## Nuevas funciones
 

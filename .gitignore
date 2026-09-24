@@ -1,0 +1,23 @@
+# Gradle / build
+.gradle/
+build/
+app/build/
+captures/
+.cxx/
+.externalNativeBuild/
+
+# Configuración local (incluye la clave API: nunca subirla al repo)
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# Salidas de compilación
+*.apk
+*.aab
+*.ap_
+
+# Sistema
+.DS_Store
+Thumbs.db

@@ -34,6 +34,23 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         private const val CONTINUATION_SILENCE_MS = 4500L
         private const val CONTINUATION_WINDOW_MS = 6000L
         private const val COMMAND_RETRY_DELAY_MS = 180L
+        private const val HOTWORD_SILENCE_MS = 2500L
+        private const val HOTWORD_WATCHDOG_MS = 12000L
+        private const val CONVERSATION_WATCHDOG_MS = 20000L
+        private const val DIME_FALLBACK_MS = 3500L
+        const val UTTERANCE_DIME = "karbys-dime"
+
+        /** Variantes fonéticas del nombre, porque el reconocedor de voz de
+         *  Android escribe "Karbys" de muchas formas distintas. */
+        private val HOTWORD_NAMES = listOf(
+            "karbys", "karvis", "karbis", "carvis", "carbis", "carbys",
+            "karvys", "carvys", "karby", "karvy", "carby", "carvy",
+            "calbis", "calvys", "kalbis", "kalbys", "karbiz", "carbiz"
+        )
+        private val WAKE_WORDS = listOf(
+            "oye", "oyes", "oiga", "hola", "hoy", "hey", "hei", "jei",
+            "yei", "ei", "ey", "her", "jer", "air", "er", "eh"
+        )
     }
 
     private var recognizer: SpeechRecognizer? = null
@@ -55,6 +72,9 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
     private var restartAllowedAt = 0L
     private var batteryReceiver: BroadcastReceiver? = null
     private lateinit var audioManager: AudioManager
+    private var dimeFallback: Runnable? = null
+    private var recognizerWatchdog: Runnable? = null
+    private var lastRecognizerActivity = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -74,12 +94,16 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
             override fun onDone(utteranceId: String?) {
-                if (utteranceId == "karbys-answer") {
-                    main.post { beginContinuationWindow() }
+                when (utteranceId) {
+                    "karbys-answer" -> main.post { beginContinuationWindow() }
+                    UTTERANCE_DIME -> main.post { dimeAnnouncementFinished() }
                 }
             }
             override fun onError(utteranceId: String?) {
-                if (utteranceId == "karbys-answer") main.post { beginContinuationWindow() }
+                when (utteranceId) {
+                    "karbys-answer" -> main.post { beginContinuationWindow() }
+                    UTTERANCE_DIME -> main.post { dimeAnnouncementFinished() }
+                }
             }
         })
 
@@ -93,14 +117,21 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_LISTEN -> beginCommandListening(true)
+        if (intent == null) {
+            // Android relanzó el servicio (START_STICKY) sin acción: Karbys
+            // debe volver a quedar atento a su palabra clave.
+            if (pausedByUser) resumeHotwordWhilePaused() else startHotword()
+            return START_STICKY
+        }
+        when (intent.action) {
+            ACTION_LISTEN -> announceThenListen()
             ACTION_STOP -> stopEverything(true)
             ACTION_SHUTDOWN -> { stopEverything(false); stopSelf() }
             ACTION_START -> startHotword()
             ACTION_TEXT -> {
                 val text = intent?.getStringExtra("text").orEmpty().trim()
                 if (text.isNotBlank()) {
+                    pausedByUser = false
                     cancelContinuationTimeout()
                     askKarbys(text)
                 }
@@ -108,6 +139,8 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
             ACTION_GREETING -> firstGreeting()
             ACTION_REMINDER -> {
                 val label = intent?.getStringExtra("label") ?: "tu recordatorio"
+                // Un recordatorio reactiva a Karbys aunque estuviera en pausa.
+                pausedByUser = false
                 main.post {
                     beepAlert()
                     speak("Recordatorio: $label.")
@@ -134,12 +167,46 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
 
     private fun destroyRecognizer() {
         listening = false
+        cancelRecognizerWatchdog()
         recognizer?.let {
             try { it.cancel() } catch (_: Exception) { }
             try { it.destroy() } catch (_: Exception) { }
         }
         recognizer = null
         recognizerGeneration++
+    }
+
+    private fun cancelRecognizerWatchdog() {
+        recognizerWatchdog?.let(main::removeCallbacks)
+        recognizerWatchdog = null
+    }
+
+    private fun cancelDimeFallback() {
+        dimeFallback?.let(main::removeCallbacks)
+        dimeFallback = null
+    }
+
+    /**
+     * Vigilante del reconocedor: en algunos teléfonos el SpeechRecognizer se
+     * queda colgado sin entregar resultados ni errores. Si no hay actividad
+     * durante demasiado tiempo, se reinicia el ciclo correspondiente.
+     */
+    private fun scheduleRecognizerWatchdog(hotword: Boolean) {
+        cancelRecognizerWatchdog()
+        val timeout = if (hotword) HOTWORD_WATCHDOG_MS else CONVERSATION_WATCHDOG_MS
+        val watchdog = Runnable {
+            if (pausedByUser || processing) return@Runnable
+            if (!listening) return@Runnable
+            if (System.currentTimeMillis() - lastRecognizerActivity < timeout) {
+                scheduleRecognizerWatchdog(hotword)
+                return@Runnable
+            }
+            destroyRecognizer()
+            if (hotword && hotwordMode) scheduleHotwordRestart(250)
+            else if (conversationMode) retryConversationListeningOrFinish()
+        }
+        recognizerWatchdog = watchdog
+        main.postDelayed(watchdog, timeout)
     }
 
     private fun setupRecognizer() {
@@ -159,27 +226,27 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
             private fun valid(): Boolean = generation == recognizerGeneration && recognizer === r
 
             override fun onReadyForSpeech(params: Bundle?) {
-                if (valid()) listening = true
+                if (valid()) {
+                    listening = true
+                    lastRecognizerActivity = System.currentTimeMillis()
+                }
             }
-            override fun onBeginningOfSpeech() = Unit
-            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onBeginningOfSpeech() {
+                if (valid()) lastRecognizerActivity = System.currentTimeMillis()
+            }
+            override fun onRmsChanged(rmsdB: Float) {
+                if (valid() && rmsdB > 0f) lastRecognizerActivity = System.currentTimeMillis()
+            }
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
             override fun onPartialResults(partialResults: Bundle?) {
-                if (!valid() || !hotword || processing || pausedByUser) return
-                val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull().orEmpty()
-                if (containsHotword(text)) {
-                    listening = false
-                    conversationMode = true
-                    hotwordMode = false
-                    continuationDeadline = System.currentTimeMillis() + CONTINUATION_WINDOW_MS
-                    beepStart()
-                    destroyRecognizer()
-                    main.postDelayed({
-                        if (!processing && conversationMode && !pausedByUser) beginCommandListening(false)
-                    }, 90)
+                if (!valid() || !hotword || processing) return
+                lastRecognizerActivity = System.currentTimeMillis()
+                val candidates = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (candidates.orEmpty().any { containsHotword(it) }) {
+                    pausedByUser = false
+                    wakeWordDetected(null)
                 }
             }
 
@@ -189,24 +256,22 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
             }
 
             override fun onResults(results: Bundle?) {
-                if (!valid() || processing || pausedByUser) return
+                if (!valid() || processing) return
                 listening = false
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.trim().orEmpty()
+                val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+                val text = candidates.firstOrNull()?.trim().orEmpty()
 
                 if (hotword) {
-                    if (containsHotword(text)) {
-                        conversationMode = true
-                        hotwordMode = false
-                        continuationDeadline = System.currentTimeMillis() + CONTINUATION_WINDOW_MS
-                        beepStart()
-                        destroyRecognizer()
-                        main.postDelayed({
-                            if (conversationMode && !pausedByUser) beginCommandListening(false)
-                        }, 90)
+                    val match = candidates.firstOrNull { containsHotword(it) }
+                    if (match != null) {
+                        pausedByUser = false
+                        wakeWordDetected(match)
                     } else {
-                        scheduleHotwordRestart(450)
+                        scheduleHotwordRestart(150)
                     }
+                } else if (pausedByUser) {
+                    // Nada que hacer en pausa: vuelve al ciclo de palabra clave.
+                    scheduleHotwordRestart(150)
                 } else if (text.isNotBlank()) {
                     cancelContinuationTimeout()
                     continuationDeadline = 0L
@@ -217,11 +282,11 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
             }
 
             override fun onError(error: Int) {
-                if (!valid() || processing || pausedByUser) return
+                if (!valid() || processing) return
                 listening = false
                 if (hotword) {
-                    scheduleHotwordRestart(500)
-                } else if (conversationMode) {
+                    scheduleHotwordRestart(350)
+                } else if (!pausedByUser && conversationMode) {
                     retryConversationListeningOrFinish()
                 }
             }
@@ -229,35 +294,90 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         return r
     }
 
+    /**
+     * La palabra clave fue escuchada. En lugar del antiguo pitido, Karbys
+     * contesta "¿Dime?" con su voz y enseguida queda escuchando la petición.
+     * Si la persona dijo su petición junto con la palabra clave
+     * ("Oye Karbys, ¿qué hora es?"), se atiende de inmediato.
+     */
+    private fun wakeWordDetected(heard: String?) {
+        hotwordMode = false
+        conversationMode = true
+        destroyRecognizer()
+        val remainder = heard?.let { hotwordRemainder(it) }
+        if (!remainder.isNullOrBlank()) {
+            cancelContinuationTimeout()
+            continuationDeadline = 0L
+            askKarbys(remainder)
+        } else {
+            announceThenListen()
+        }
+    }
+
     private fun scheduleHotwordRestart(delayMs: Long) {
-        if (pausedByUser || processing || !hotwordMode) return
+        // Nota: aunque el usuario haya puesto en pausa a Karbys, el ciclo de la
+        // palabra clave sigue activo para poder reactivarlo con la voz.
+        if (processing || !hotwordMode) return
         val now = System.currentTimeMillis()
         val delay = maxOf(delayMs, restartAllowedAt - now)
         restartAllowedAt = now + delay + 250
         main.postDelayed({
-            if (!pausedByUser && !processing && hotwordMode) restartHotword()
+            if (!processing && hotwordMode) restartHotword()
         }, delay)
     }
 
     private fun containsHotword(text: String): Boolean {
         val n = normalize(text)
-        val names = listOf(
-            "karbys", "karvis", "karbis", "carvis", "carbis", "carbys",
-            "karvys", "carvys", "karby", "karvy", "carby", "carvy"
-        )
-        val wakeWords = listOf("oye", "hey", "ei", "ey", "oiga", "hola", "hoy")
+        if (n.isBlank()) return false
+        val compact = n.replace(" ", "")
 
-        // First accept the exact/near-exact wake phrase. Android speech
-        // recognition often changes the spelling of "Karbys".
-        for (name in names) {
-            if (wakeWords.any { w -> n.contains("$w $name") }) return true
+        // Frase completa de activación: "oye karbys", "hey karbis", "her karbys"…
+        // El reconocedor de Android cambia con frecuencia la ortografía.
+        for (name in HOTWORD_NAMES) {
+            if (WAKE_WORDS.any { w -> n.contains("$w $name") }) return true
         }
 
-        // Also accept just the assistant name. This makes the wake word
-        // reliable when the recognizer drops the first word ("oye").
-        return names.any { name ->
-            n == name || n.contains(" $name") || n.startsWith("$name ")
+        // También basta con escuchar el nombre del asistente, útil cuando el
+        // reconocedor se come la primera palabra ("oye").
+        if (HOTWORD_NAMES.any { name -> n == name || n.contains(" $name") || n.startsWith("$name ") }) return true
+
+        // Variante pegada: "oyekarbys", "herkarbys"…
+        if (HOTWORD_NAMES.any { name -> compact.contains(name) }) return true
+
+        // Coincidencia difusa: tolera errores de transcripción del nombre
+        // (por ejemplo "karpys" o "calbis") comparando palabra por palabra.
+        return n.split(" ").any { token ->
+            token.length >= 4 && HOTWORD_NAMES.any { name -> levenshtein(token, name) <= 1 }
         }
+    }
+
+    /** Extrae lo que se dijo junto con la palabra clave, si hay algo más. */
+    private fun hotwordRemainder(text: String): String? {
+        val n = normalize(text)
+        for (name in HOTWORD_NAMES) {
+            val idx = n.indexOf(name)
+            if (idx < 0) continue
+            val after = n.substring(idx + name.length).trim { it in " .,;:!?¡¿" }
+            if (after.length >= 3) return after
+            val before = n.substring(0, idx).trim { it in " .,;:!?¡¿" }
+            if (before.length >= 3) return before
+        }
+        return null
+    }
+
+    private fun levenshtein(a: String, b: String): Int {
+        if (a == b) return 0
+        val dp = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            var prev = dp[0]
+            dp[0] = i
+            for (j in 1..b.length) {
+                val tmp = dp[j]
+                dp[j] = minOf(dp[j] + 1, dp[j - 1] + 1, prev + if (a[i - 1] == b[j - 1]) 0 else 1)
+                prev = tmp
+            }
+        }
+        return dp[b.length]
     }
 
     private fun normalize(text: String): String = text.lowercase(Locale.ROOT)
@@ -277,27 +397,30 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
 
     private fun startHotword() {
         cancelContinuationTimeout()
+        cancelDimeFallback()
         pausedByUser = false
         conversationMode = false
         hotwordMode = true
         processing = false
-        restartAllowedAt = System.currentTimeMillis() + 700
-        scheduleHotwordRestart(700)
+        restartAllowedAt = System.currentTimeMillis() + 400
+        scheduleHotwordRestart(400)
     }
 
     private fun restartHotword() {
-        if (processing || !hotwordMode || pausedByUser) return
+        if (processing || !hotwordMode) return
         if (System.currentTimeMillis() < restartAllowedAt) {
             scheduleHotwordRestart(restartAllowedAt - System.currentTimeMillis())
             return
         }
         main.post {
-            if (processing || !hotwordMode || pausedByUser) return@post
+            if (processing || !hotwordMode) return@post
             routeToHeadsetIfPossible()
             val r = createRecognizer(true) ?: return@post
             try {
-                r.startListening(speechIntent(partial = true, silence = 900L))
+                r.startListening(speechIntent(partial = true, silence = HOTWORD_SILENCE_MS))
                 listening = true
+                lastRecognizerActivity = System.currentTimeMillis()
+                scheduleRecognizerWatchdog(hotword = true)
             } catch (_: Exception) {
                 destroyRecognizer()
                 scheduleHotwordRestart(900)
@@ -305,7 +428,57 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun beginCommandListening(playBeep: Boolean = true) {
+    /**
+     * En lugar del antiguo pitido, Karbys dice "¿Dime?" con su voz y queda
+     * escuchando en cuanto termina la palabra. Es la señal de "te escucho",
+     * pensada para no depender de la pantalla.
+     */
+    private fun announceThenListen() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            speak("Necesito permiso para usar el micrófono.")
+            startHotword()
+            return
+        }
+        // Llegar aquí es una acción explícita del usuario (palabra clave o
+        // botón HABLAR), así que se levanta cualquier pausa.
+        pausedByUser = false
+        hotwordMode = false
+        processing = false
+        conversationMode = true
+        cancelContinuationTimeout()
+        destroyRecognizer()
+        // La ventana de conversación se concederá fresca al terminar el "¿Dime?".
+        continuationDeadline = 0L
+
+        if (!::tts.isInitialized) {
+            beginCommandListening()
+            return
+        }
+
+        main.post {
+            routeToHeadsetIfPossible()
+            try {
+                tts.speak("¿Dime?", TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_DIME)
+            } catch (_: Exception) {
+                beginCommandListening()
+                return@post
+            }
+            // Respaldo: si el motor TTS nunca avisa que terminó, de todos
+            // modos abrimos el micrófono poco después.
+            cancelDimeFallback()
+            val fallback = Runnable { dimeAnnouncementFinished() }
+            dimeFallback = fallback
+            main.postDelayed(fallback, DIME_FALLBACK_MS)
+        }
+    }
+
+    private fun dimeAnnouncementFinished() {
+        cancelDimeFallback()
+        if (pausedByUser || processing || !conversationMode || listening) return
+        beginCommandListening()
+    }
+
+    private fun beginCommandListening() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             speak("Necesito permiso para usar el micrófono.")
             startHotword()
@@ -315,7 +488,6 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         processing = false
         conversationMode = true
         cancelContinuationTimeout()
-        if (playBeep) beepStart()
 
         main.post {
             if (pausedByUser || processing || !conversationMode) return@post
@@ -326,8 +498,13 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
                 return@post
             }
             try {
+                if (continuationDeadline == 0L) {
+                    continuationDeadline = System.currentTimeMillis() + CONTINUATION_WINDOW_MS + CONTINUATION_SILENCE_MS
+                }
                 r.startListening(speechIntent(partial = false, silence = CONTINUATION_SILENCE_MS))
                 listening = true
+                lastRecognizerActivity = System.currentTimeMillis()
+                scheduleRecognizerWatchdog(hotword = false)
             } catch (_: Exception) {
                 destroyRecognizer()
                 finishConversation()
@@ -346,15 +523,29 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun beginContinuationWindow() {
-        if (pausedByUser || processing) return
+        if (processing) return
+        if (pausedByUser) {
+            // En pausa solo queda activo el oído para la palabra clave, de modo
+            // que decir "Oye Karbys" vuelve a despertar al asistente.
+            resumeHotwordWhilePaused()
+            return
+        }
         processing = false
         conversationMode = true
         hotwordMode = false
-        continuationDeadline = System.currentTimeMillis() + CONTINUATION_WINDOW_MS
-        beepReady()
-        main.postDelayed({
-            if (!pausedByUser && conversationMode && !processing) beginCommandListening(false)
-        }, 140)
+        // Tras responder, Karbys vuelve a ofrecer la conversación con su voz.
+        announceThenListen()
+    }
+
+    private fun resumeHotwordWhilePaused() {
+        cancelContinuationTimeout()
+        cancelDimeFallback()
+        conversationMode = false
+        hotwordMode = true
+        processing = false
+        destroyRecognizer()
+        restartAllowedAt = System.currentTimeMillis() + 400
+        scheduleHotwordRestart(400)
     }
 
     /**
@@ -380,7 +571,7 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
         destroyRecognizer()
         main.postDelayed({
             if (!pausedByUser && conversationMode && !processing && System.currentTimeMillis() < continuationDeadline) {
-                beginCommandListening(false)
+                beginCommandListening()
             } else if (!pausedByUser && conversationMode && !processing) {
                 finishConversation()
             }
@@ -389,6 +580,7 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
 
     private fun finishConversation() {
         cancelContinuationTimeout()
+        cancelDimeFallback()
         continuationDeadline = 0L
         destroyRecognizer()
         conversationMode = false
@@ -428,7 +620,7 @@ class KarbysService : Service(), TextToSpeech.OnInitListener {
                 pausedByUser = true
                 hotwordMode = false
                 conversationMode = false
-                recognizer?.cancel()
+                main.post { try { recognizer?.cancel() } catch (_: Exception) { } }
                 "De acuerdo. Quedo en pausa. Cuando quieras, dime oye karbys."
             }
             n.contains("pon una alarma") || n.contains("crea una alarma") || n.contains("recuérdame") || n.contains("recuerdame") -> scheduleReminder(text)
@@ -533,6 +725,7 @@ Regla de seguridad: el TF-Luna tiene una zona de protección de mayor alcance qu
                 val percent = if (level >= 0 && scale > 0) level * 100 / scale else -1
                 if (percent in 0..5 && !batteryWarningSent) {
                     batteryWarningSent = true
+                    pausedByUser = false
                     main.post {
                         beepAlert()
                         speak("Atención: la batería del celular está al cinco por ciento o menos. Conviene ponerlo a cargar.")
@@ -567,15 +760,13 @@ Regla de seguridad: el TF-Luna tiene una zona de protección de mayor alcance qu
         } catch (_: Exception) { }
     }
 
-    private fun beepStart() { try { tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120) } catch (_: Exception) {} }
     private fun beepReady() { try { tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 100) } catch (_: Exception) {} }
     private fun beepEnd() { try { tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 120) } catch (_: Exception) {} }
     private fun beepAlert() { try { tone?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 250) } catch (_: Exception) {} }
     private fun cancelContinuationTimeout() { continuationTimeout?.let(main::removeCallbacks); continuationTimeout = null }
 
     private fun speak(text: String) {
-        pausedByUser = false
-        if (!::tts.isInitialized) { startHotword(); return }
+        if (!::tts.isInitialized) { if (!pausedByUser) startHotword(); return }
         hotwordMode = false
         conversationMode = true
         val spoken = text.replace("WayCore", "guaycor", ignoreCase = true)
@@ -593,7 +784,10 @@ Regla de seguridad: el TF-Luna tiene una zona de protección de mayor alcance qu
         pausedByUser = true
         hotwordMode = false
         conversationMode = false
+        listening = false
         cancelContinuationTimeout()
+        cancelDimeFallback()
+        cancelRecognizerWatchdog()
         recognizer?.cancel()
         if (::tts.isInitialized) tts.stop()
         if (message) speak("De acuerdo. Quedé en pausa. Cuando quieras, volvemos a hablar.")
@@ -613,6 +807,8 @@ Regla de seguridad: el TF-Luna tiene una zona de protección de mayor alcance qu
 
     override fun onDestroy() {
         batteryReceiver?.let { try { unregisterReceiver(it) } catch (_: Exception) {} }
+        cancelContinuationTimeout()
+        cancelDimeFallback()
         destroyRecognizer()
         if (::tts.isInitialized) tts.shutdown()
         tone?.release(); tone = null
