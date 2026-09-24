@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
     private var buzzer by mutableStateOf(true)
     private var battery by mutableStateOf(0)
     private var locationText by mutableStateOf("Ubicación no disponible")
+    private var keyConfigured by mutableStateOf(false)
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         val mic = result[Manifest.permission.RECORD_AUDIO] == true || has(Manifest.permission.RECORD_AUDIO)
@@ -56,13 +57,26 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        keyConfigured = ApiKeyStore.isConfigured(this)
         val filter = IntentFilter(WayHatService.ACTION_STATUS)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(receiver, filter)
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    var prompt by remember { mutableStateOf("") }
+                    if (!keyConfigured) {
+                        KeySetupScreen(
+                            onSave = { apiKey ->
+                                ApiKeyStore.save(this, apiKey)
+                                keyConfigured = true
+                                requestPermissionsIfNeeded()
+                            },
+                            onCancel = if (ApiKeyStore.isConfigured(this)) {
+                                { keyConfigured = true }
+                            } else null
+                        )
+                    } else {
+                        var prompt by remember { mutableStateOf("") }
                     Column(
                         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -109,12 +123,14 @@ class MainActivity : ComponentActivity() {
                             Button(onClick = { sendHardware("BUZZER_TEST") }) { Text("PROBAR BUZZER") }
                             Button(onClick = { sendHardware("SENSORS") }) { Text("ACTUALIZAR") }
                         }
+                        Button(onClick = { keyConfigured = false }) { Text("CAMBIAR CLAVE API") }
                         if (paused) Button(onClick = { requestPermissionsIfNeeded() }) { Text("ACTIVAR KARBYS") }
                     }
                 }
+                }
             }
         }
-        requestPermissionsIfNeeded()
+        if (keyConfigured) requestPermissionsIfNeeded()
     }
 
     override fun onDestroy() {
@@ -178,4 +194,51 @@ class MainActivity : ComponentActivity() {
 
     private fun cm(v: Int) = if (v > 0) "$v cm" else "—"
     private fun has(permission: String) = ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+}
+
+/**
+ * Pantalla inicial de configuración: se muestra antes de entrar a la app
+ * cuando todavía no hay clave API de Gemini guardada en el teléfono.
+ */
+@Composable
+private fun KeySetupScreen(onSave: (String) -> Unit, onCancel: (() -> Unit)? = null) {
+    var apiKey by remember { mutableStateOf("") }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("WAYCORE", style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "¡Hola! Para que Karbys responda tus preguntas necesita una clave API de Gemini.",
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Pégala aquí una sola vez. Quedará guardada en este teléfono y después Karbys funcionará sola.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(18.dp))
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Clave API de Gemini") }
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { onSave(apiKey.trim()) },
+            enabled = apiKey.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().height(56.dp)
+        ) { Text("GUARDAR Y EMPEZAR") }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Si no tienes una clave, créala gratis en aistudio.google.com, en la opción API Keys.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (onCancel != null) {
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onCancel) { Text("Cancelar y volver") }
+        }
+    }
 }

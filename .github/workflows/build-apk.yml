@@ -70,12 +70,13 @@ jobs:
             APK de WayCore listo para instalar.
 
             Novedades:
+            - Al abrir la app por primera vez te pide tu clave API de Gemini; la guardas una vez y Karbys funciona sola.
             - Karbys dice "¿Dime?" con su voz en lugar del pitido antes de escucharte.
             - Palabra clave mucho más confiable (acepta variantes como "Oye Karbys", "Hey Karbis" o solo "Karbys").
             - Puedes decir tu pregunta junto con la palabra clave: "Oye Karbys, ¿qué hora es?".
             - La pausa por voz ahora funciona y se reactiva diciendo "Oye Karbys".
 
-            Instalación: descarga el archivo .apk en tu teléfono Android, ábrelo y acepta la instalación.
+            Instalación: descarga el archivo .apk en tu teléfono Android, ábrelo, acepta la instalación y pega tu clave API de Gemini cuando la app te la pida.
 
       - name: Copiar APK a la rama apk/latest
         run: |

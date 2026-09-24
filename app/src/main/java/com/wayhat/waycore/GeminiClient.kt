@@ -16,9 +16,9 @@ object GeminiClient {
         .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    suspend fun ask(user: String, memory: List<ConversationTurn>, deviceContext: String): String {
-        val apiKey = BuildConfig.GEMINI_API_KEY.trim()
-        if (apiKey.isBlank()) return "Falta configurar la clave de Gemini en WayCore."
+    suspend fun ask(apiKey: String, user: String, memory: List<ConversationTurn>, deviceContext: String): String {
+        val key = apiKey.trim()
+        if (key.isBlank()) return "Falta configurar la clave de Gemini en WayCore."
         if (user.isBlank()) return "No escuché ninguna pregunta."
 
         return try {
@@ -29,7 +29,7 @@ object GeminiClient {
             )
 
             repeat(3) {
-                val raw = generate(apiKey, contents)
+                val raw = generate(key, contents)
                 if (raw == null) return "No pude obtener una respuesta válida de Gemini."
                 val candidate = raw.optJSONArray("candidates")?.optJSONObject(0)
                     ?: return "Gemini no devolvió una respuesta válida."

@@ -4,6 +4,10 @@ Esta versión usa la versión Bluetooth SPP estable anterior como base.
 
 ## Novedades de la app v0.6.0
 
+- **Clave API dentro de la app**: la primera vez que abres WayCore te pide la
+  clave API de Gemini; la guardas una vez y Karbys funciona sola (queda en el
+  almacenamiento privado del teléfono). Puedes cambiarla con el botón
+  CAMBIAR CLAVE API.
 - **"¿Dime?" en lugar del pitido**: cuando Karbys te va a escuchar (por palabra
   clave, por el botón HABLAR o después de responderte), lo anuncia con su voz
   diciendo "¿Dime?" en vez del antiguo sonidito.
@@ -50,9 +54,16 @@ Descarga el archivo `WayCore-vX.Y.Z.apk` en tu teléfono Android e instálalo.
 
 ## API key
 
-No hay ninguna clave API incluida. Configúrala en `local.properties`:
+La app pide la clave API de Gemini la primera vez que se abre y la guarda en
+el teléfono; no hace falta configurar nada más.
+
+Opcional para quien compile el proyecto: también puedes incrustar la clave en
+el build creando `local.properties` con:
 
 `GEMINI_API_KEY=TU_CLAVE`
+
+(o definiendo el secreto `GEMINI_API_KEY` en GitHub Actions). Si la clave está
+incrustada, la app la usa directamente sin pedir nada.
 
 ## Bluetooth
 
