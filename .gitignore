@@ -1,0 +1,16 @@
+# Clave de API de Gemini: nunca se sube
+local.properties
+
+# Gradle / Android Studio
+.gradle/
+.idea/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# Sistema
+.DS_Store

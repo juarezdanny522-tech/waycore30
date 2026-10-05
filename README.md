@@ -37,3 +37,14 @@ No hay ninguna clave API incluida. Configúrala en `local.properties`:
 ## Bluetooth
 
 El teléfono debe tener `WayHat-Karbys` vinculado. WayCore abre la conexión SPP automáticamente usando el UUID estándar de Bluetooth Classic.
+
+## Documentación
+
+El manual completo de uso, instalación y conexiones está en `docs/Manual_WayCore_WayHat.pdf`:
+
+- Conexiones de hardware (pines del ESP32, HC-SR04, TF-Luna, DHT11 y buzzer).
+- Conexiones lógicas (Bluetooth SPP, protocolo JSON con WayHat y API de Gemini).
+- Instalación paso a paso, uso de la app, comandos de voz y solución de problemas.
+
+Se genera con `python3 docs/generar_manual.py` (requiere `reportlab`). Si cambias pines, nombres,
+mensajes de estado o endpoints, vuelve a generarlo para que no quede desactualizado.
